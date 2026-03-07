@@ -66,13 +66,17 @@ class Evaluator:
         # 计算每个样本的误差
         sample_mse = torch.mean((spectra_pred - spectra_true) ** 2, dim=1).cpu().numpy()
         
+        spectra_pred_norm_np = spectra_pred.cpu().numpy()
+        spectra_pred_real = self.normalizers['spectra'].inverse_transform(spectra_pred_norm_np)
+        spectra_true_real = test_data['spectra_raw']
+
         results = {
             'mse': mse,
             'mae': mae,
             'rmse': np.sqrt(mse),
             'sample_mse': sample_mse,
-            'spectra_pred': spectra_pred.cpu().numpy(),
-            'spectra_true': spectra_true.cpu().numpy(),
+            'spectra_pred': spectra_pred_real,
+            'spectra_true': spectra_true_real,
         }
         
         print(f"\n前向网络评估结果:")
@@ -99,14 +103,19 @@ class Evaluator:
         # 计算每个样本的误差
         sample_mse = torch.mean((spectra_recon - spectra) ** 2, dim=1).cpu().numpy()
         
+        spectra_recon_real = self.normalizers['spectra'].inverse_transform(
+            spectra_recon.cpu().numpy()
+        )
+        spectra_true_real = test_data['spectra_raw']
+
         results = {
             'spectra_mse': spectra_mse,
             'spectra_mae': spectra_mae,
             'spectra_rmse': np.sqrt(spectra_mse),
             'sample_mse': sample_mse,
             'params_pred': params_pred.cpu().numpy(),
-            'spectra_recon': spectra_recon.cpu().numpy(),
-            'spectra_true': spectra.cpu().numpy(),
+            'spectra_recon': spectra_recon_real,
+            'spectra_true': spectra_true_real,
         }
         
         print(f"\n逆向设计评估结果:")
@@ -198,7 +207,8 @@ class Evaluator:
         
         if num_samples == 1:
             axes = [axes]
-        
+            
+        np.random.seed(48)
         # 随机选择样本
         indices = np.random.choice(len(spectra_true), num_samples, replace=False)
         
