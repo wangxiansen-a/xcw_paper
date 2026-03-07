@@ -79,7 +79,6 @@ class TandemTrainer:
         forward_net = LSTMForwardNet(FORWARD_CONFIG).to(self.device)
         checkpoint = torch.load(FORWARD_MODEL_PATH, map_location=self.device)
         forward_net.load_state_dict(checkpoint['model_state_dict'])
-        forward_net.eval()
 
         print(f"LSTM前向网络加载成功，最佳损失: {checkpoint.get('best_loss', 'N/A')}")
         return forward_net
@@ -87,7 +86,6 @@ class TandemTrainer:
     def train_epoch(self, train_loader):
         """训练一个 epoch"""
         self.backward_net.train()
-        self.forward_net.eval()
 
         total_loss = 0.0
         num_batches = 0
@@ -113,7 +111,6 @@ class TandemTrainer:
     def evaluate(self, data_loader):
         """评估模型"""
         self.backward_net.eval()
-        self.forward_net.eval()
 
         total_loss = 0.0
         num_batches = 0

@@ -172,10 +172,9 @@ class TandemNet(nn.Module):
         return predicted_params, reconstructed_spectrum
 
     def freeze_forward_net(self):
-        """冻结前向网络参数"""
+        """冻结前向网络参数（保持train模式，因为cuDNN LSTM不支持eval模式下的backward）"""
         for param in self.forward_net.parameters():
             param.requires_grad = False
-        self.forward_net.eval()
 
     def unfreeze_forward_net(self):
         """解冻前向网络参数"""
