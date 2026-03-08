@@ -27,7 +27,7 @@ def train():
     print("-" * 60)
     train_forward_network()
 
-    # 阶段2: 训练串联网络（MLP后向 + 冻结LSTM前向）
+    # 阶段2: 训练串联网络（LSTM后向 + 冻结LSTM前向）
     print("\n[阶段2] 训练串联网络（逆向设计）")
     print("-" * 60)
     train_tandem_network()

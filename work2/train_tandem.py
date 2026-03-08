@@ -1,6 +1,6 @@
 """
 串联网络训练（逆向设计）
-后向网络（MLP） + 前向网络（LSTM，冻结）
+后向网络（LSTM） + 前向网络（LSTM，冻结）
 """
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ from config import (
     TANDEM_HISTORY_PATH, CHECKPOINT_DIR
 )
 from data_loader import prepare_data, create_tandem_dataloaders
-from models import LSTMForwardNet, BackwardNet, TandemNet
+from models import LSTMForwardNet, LSTMBackwardNet, TandemNet
 from utils import set_seed, get_device, EarlyStopping
 
 
@@ -30,8 +30,8 @@ class TandemTrainer:
         # 加载预训练的LSTM前向网络
         self.forward_net = self._load_pretrained_forward_net()
 
-        # 创建MLP后向网络
-        self.backward_net = BackwardNet(self.config).to(self.device)
+        # 创建LSTM后向网络
+        self.backward_net = LSTMBackwardNet(self.config).to(self.device)
 
         # 创建串联网络，冻结前向网络
         self.tandem_net = TandemNet(

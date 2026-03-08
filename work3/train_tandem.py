@@ -1,6 +1,6 @@
 """
 串联网络训练（逆向设计）
-后向网络（MLP） + 前向网络（Mamba，冻结）
+后向网络（Mamba） + 前向网络（Mamba，冻结）
 """
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ from config import (
     TANDEM_HISTORY_PATH, CHECKPOINT_DIR
 )
 from data_loader import prepare_data, create_tandem_dataloaders
-from models import MambaForwardNet, BackwardNet, TandemNet
+from models import MambaForwardNet, MambaBackwardNet, TandemNet
 from utils import set_seed, get_device, EarlyStopping
 
 
@@ -29,7 +29,7 @@ class TandemTrainer:
 
         self.forward_net = self._load_pretrained_forward_net()
 
-        self.backward_net = BackwardNet(self.config).to(self.device)
+        self.backward_net = MambaBackwardNet(self.config).to(self.device)
 
         self.tandem_net = TandemNet(
             self.backward_net,

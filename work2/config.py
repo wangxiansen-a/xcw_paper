@@ -34,13 +34,13 @@ FORWARD_CONFIG = {
     "dropout": 0.1,
 }
 
-# ============== 后向网络配置（MLP） ==============
+# ============== LSTM后向网络配置 ==============
+# 参照论文逆向网络: 4层LSTM, 隐藏层分别为80, 50, 30, 10（与前向网络对称）
 BACKWARD_CONFIG = {
-    "input_dim": 200,
-    "output_dim": 4,
-    "hidden_dims": [256, 512, 512, 256, 128],
+    "input_dim": 200,        # 吸收光谱维度（序列长度）
+    "output_dim": 4,         # 结构参数维度
+    "lstm_hidden_sizes": [80, 50, 30, 10],  # 4层LSTM隐藏层（与前向对称）
     "dropout": 0.1,
-    "use_batch_norm": True,
 }
 
 # ============== LSTM前向网络训练配置 ==============

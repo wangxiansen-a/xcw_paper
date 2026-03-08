@@ -1,7 +1,7 @@
 """
 神经网络模型定义
 正向网络: 基于LSTM（参照论文架构）
-后向网络: MLP（串联网络逆向设计）
+后向网络: 基于LSTM（与正向网络对称）
 """
 import torch
 import torch.nn as nn
@@ -93,62 +93,94 @@ class LSTMForwardNet(nn.Module):
         return output
 
 
-class BackwardNet(nn.Module):
+class LSTMBackwardNet(nn.Module):
     """
-    后向网络（MLP）：吸收光谱 (200维) → 结构参数 (4维)
+    基于LSTM的后向网络：吸收光谱 (200维) → 结构参数 (4维)
 
-    架构: Input(200) → [Linear→BN→LeakyReLU/Tanh→Dropout] × 5 → Linear(4)
-    注意：输出层无激活函数（参数经 Z-Score 标准化，可为任意实数）
+    与前向网络对称：
+    - 将200维光谱视为长度为200的序列，每个时间步输入1个值
+    - 4层LSTM，隐藏层分别为 80, 50, 30, 10 个单元（与前向网络对称）
+    - 最后一层线性连接输出结构参数
+    - 输出层无激活函数（参数经 Z-Score 标准化，可为任意实数）
+
+    架构: Input(200,1) → LSTM(1→80) → LSTM(80→50) → LSTM(50→30) → LSTM(30→10) → Linear(10→4)
     """
     def __init__(self, config=None):
-        super(BackwardNet, self).__init__()
+        super(LSTMBackwardNet, self).__init__()
 
         if config is None:
             config = BACKWARD_CONFIG
 
-        input_dim = config["input_dim"]
-        output_dim = config["output_dim"]
-        hidden_dims = config["hidden_dims"]
-        dropout = config["dropout"]
-        use_batch_norm = config["use_batch_norm"]
+        self.input_dim = config["input_dim"]
+        self.output_dim = config["output_dim"]
+        self.hidden_sizes = config["lstm_hidden_sizes"]
+        dropout = config.get("dropout", 0.1)
 
-        layers = []
-        prev_dim = input_dim
+        # 构建多层LSTM（每层不同hidden_size，需逐层构建）
+        self.lstm_layers = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()
 
-        for i, hidden_dim in enumerate(hidden_dims):
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            if i % 2 == 0:
-                layers.append(nn.LeakyReLU(0.2))
-            else:
-                layers.append(nn.Tanh())
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            prev_dim = hidden_dim
+        prev_size = 1  # 每个时间步输入1个特征
+        for hidden_size in self.hidden_sizes:
+            self.lstm_layers.append(
+                nn.LSTM(input_size=prev_size, hidden_size=hidden_size, batch_first=True)
+            )
+            self.layer_norms.append(nn.LayerNorm(hidden_size))
+            prev_size = hidden_size
 
-        layers.append(nn.Linear(prev_dim, output_dim))
+        self.dropout = nn.Dropout(dropout)
 
-        self.network = nn.Sequential(*layers)
+        # 输出层: 取最后时间步的输出，线性映射到参数维度
+        self.fc_out = nn.Linear(self.hidden_sizes[-1], self.output_dim)
+
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """Xavier Uniform 权重初始化"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        """权重初始化"""
+        for lstm in self.lstm_layers:
+            for name, param in lstm.named_parameters():
+                if 'weight_ih' in name:
+                    nn.init.xavier_uniform_(param)
+                elif 'weight_hh' in name:
+                    nn.init.orthogonal_(param)
+                elif 'bias' in name:
+                    nn.init.zeros_(param)
+                    # 设置遗忘门偏置为1，有助于长期记忆
+                    n = param.size(0)
+                    param.data[n // 4:n // 2].fill_(1.0)
+
+        nn.init.xavier_uniform_(self.fc_out.weight)
+        nn.init.zeros_(self.fc_out.bias)
 
     def forward(self, x):
-        return self.network(x)
+        """
+        Args:
+            x: 吸收光谱 (batch_size, 200)
+        Returns:
+            预测参数 (batch_size, 4)
+        """
+        # 将光谱reshape为序列: (batch, seq_len=200, feature=1)
+        out = x.unsqueeze(-1)
+
+        for lstm, ln in zip(self.lstm_layers, self.layer_norms):
+            out, _ = lstm(out)
+            out = ln(out)
+            out = self.dropout(out)
+
+        # 取最后一个时间步的输出
+        last_output = out[:, -1, :]  # (batch, hidden_size[-1])
+
+        # 线性映射到参数维度（无激活函数）
+        output = self.fc_out(last_output)
+
+        return output
 
 
 class TandemNet(nn.Module):
     """
-    串联网络：组合后向网络（MLP）与前向网络（LSTM）
+    串联网络：组合后向网络（LSTM）与前向网络（LSTM）
 
-    流程: [目标光谱] → [后向网络MLP] → [预测参数] → [前向网络LSTM(冻结)] → [重建光谱]
+    流程: [目标光谱] → [后向网络LSTM] → [预测参数] → [前向网络LSTM(冻结)] → [重建光谱]
     """
     def __init__(self, backward_net, forward_net, freeze_forward=True):
         super(TandemNet, self).__init__()
@@ -200,8 +232,8 @@ if __name__ == "__main__":
     print(f"输出范围: [{y.min().item():.4f}, {y.max().item():.4f}]")
 
     print("\n" + "=" * 50)
-    print("后向网络测试")
-    backward_net = BackwardNet()
+    print("LSTM后向网络测试")
+    backward_net = LSTMBackwardNet()
     print(backward_net)
     print(f"可训练参数: {count_parameters(backward_net):,}")
 

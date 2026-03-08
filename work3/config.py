@@ -37,13 +37,16 @@ FORWARD_CONFIG = {
     "dropout": 0.1,
 }
 
-# ============== 后向网络配置（MLP） ==============
+# ============== Mamba后向网络配置 ==============
 BACKWARD_CONFIG = {
     "input_dim": 500,
     "output_dim": 6,
-    "hidden_dims": [256, 512, 512, 256, 128],
+    "d_model": 64,          # 嵌入维度（与前向网络一致）
+    "d_state": 16,          # SSM 状态维度
+    "d_conv": 4,            # 因果卷积核大小
+    "expand": 2,            # 扩展因子
+    "n_layers": 4,          # Mamba Block 层数
     "dropout": 0.1,
-    "use_batch_norm": True,
 }
 
 # ============== Mamba前向网络训练配置 ==============

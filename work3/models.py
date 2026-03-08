@@ -1,7 +1,7 @@
 """
 神经网络模型定义
 正向网络: 基于 Mamba（选择性状态空间模型）
-后向网络: MLP（串联网络逆向设计）
+后向网络: 基于 Mamba（与正向网络对称）
 
 Mamba 架构参考:
   Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces", 2023
@@ -305,14 +305,20 @@ class MambaForwardNet(nn.Module):
 
 
 # =============================================================================
-# MLP 后向网络
+# Mamba 后向网络
 # =============================================================================
 
-class BackwardNet(nn.Module):
+class MambaBackwardNet(nn.Module):
     """
-    后向网络（MLP）：光谱 (500维) → 结构参数 (6维)
+    基于 Mamba 的后向网络：光谱 (500维) → 结构参数 (6维)
 
-    架构: Input(500) → [Linear→BN→LeakyReLU/Tanh→Dropout] × 5 → Linear(6)
+    与前向网络对称：
+    将 500 维光谱视为长度为 500 的序列，每个时间步输入 1 个值，
+    嵌入到 d_model 维后通过 N 个 Mamba Block，取最后时间步的输出
+    线性映射到参数维度。
+    输出层无激活函数（参数经 Z-Score 标准化，可为任意实数）。
+
+    架构: Input(500,1) → Embedding(1→D) → [MambaBlock]×N → Norm → LastStep → Linear(D→6)
     """
     def __init__(self, config=None):
         super().__init__()
@@ -320,41 +326,60 @@ class BackwardNet(nn.Module):
         if config is None:
             config = BACKWARD_CONFIG
 
-        input_dim = config["input_dim"]
-        output_dim = config["output_dim"]
-        hidden_dims = config["hidden_dims"]
-        dropout = config["dropout"]
-        use_batch_norm = config["use_batch_norm"]
+        self.input_dim = config["input_dim"]
+        self.output_dim = config["output_dim"]
+        d_model = config["d_model"]
+        d_state = config["d_state"]
+        d_conv = config["d_conv"]
+        expand = config["expand"]
+        n_layers = config["n_layers"]
+        dropout = config.get("dropout", 0.1)
 
-        layers = []
-        prev_dim = input_dim
+        # 输入嵌入: 将每个标量嵌入到 d_model 维
+        self.embedding = nn.Linear(1, d_model)
 
-        for i, hidden_dim in enumerate(hidden_dims):
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            if use_batch_norm:
-                layers.append(nn.BatchNorm1d(hidden_dim))
-            if i % 2 == 0:
-                layers.append(nn.LeakyReLU(0.2))
-            else:
-                layers.append(nn.Tanh())
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            prev_dim = hidden_dim
+        # Mamba Block 堆叠
+        self.layers = nn.ModuleList([
+            MambaBlock(d_model, d_state, d_conv, expand, dropout)
+            for _ in range(n_layers)
+        ])
 
-        layers.append(nn.Linear(prev_dim, output_dim))
+        # 输出层（无 Sigmoid，参数可为任意实数）
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, self.output_dim)
 
-        self.network = nn.Sequential(*layers)
         self._initialize_weights()
 
     def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        """权重初始化"""
+        nn.init.xavier_uniform_(self.embedding.weight)
+        nn.init.zeros_(self.embedding.bias)
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
     def forward(self, x):
-        return self.network(x)
+        """
+        Args:
+            x: 光谱 (batch_size, 500)
+        Returns:
+            预测参数 (batch_size, 6)
+        """
+        # (B, 500) → (B, 500, 1) → (B, 500, d_model)
+        x = x.unsqueeze(-1)
+        x = self.embedding(x)
+
+        # 通过 Mamba Block 堆叠
+        for layer in self.layers:
+            x = layer(x)
+
+        # 取最后一个时间步
+        x = self.norm(x)
+        x = x[:, -1, :]  # (B, d_model)
+
+        # 映射到参数维度（无激活函数）
+        output = self.head(x)
+
+        return output
 
 
 # =============================================================================
@@ -363,9 +388,9 @@ class BackwardNet(nn.Module):
 
 class TandemNet(nn.Module):
     """
-    串联网络：组合后向网络（MLP）与前向网络（Mamba）
+    串联网络：组合后向网络（Mamba）与前向网络（Mamba）
 
-    流程: [目标光谱] → [后向网络MLP] → [预测参数] → [前向网络Mamba(冻结)] → [重建光谱]
+    流程: [目标光谱] → [后向网络Mamba] → [预测参数] → [前向网络Mamba(冻结)] → [重建光谱]
     """
     def __init__(self, backward_net, forward_net, freeze_forward=True):
         super().__init__()
@@ -409,8 +434,8 @@ if __name__ == "__main__":
     print(f"输出范围: [{y.min().item():.4f}, {y.max().item():.4f}]")
 
     print("\n" + "=" * 50)
-    print("后向网络测试")
-    backward_net = BackwardNet()
+    print("Mamba后向网络测试")
+    backward_net = MambaBackwardNet()
     print(f"可训练参数: {count_parameters(backward_net):,}")
 
     x = torch.randn(4, 500)

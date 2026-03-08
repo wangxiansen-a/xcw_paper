@@ -12,7 +12,7 @@ from config import (
     FORWARD_HISTORY_PATH, TANDEM_HISTORY_PATH, CHECKPOINT_DIR
 )
 from data_loader import prepare_data, load_normalizers
-from models import LSTMForwardNet, BackwardNet, TandemNet
+from models import LSTMForwardNet, LSTMBackwardNet, TandemNet
 from utils import get_device
 
 
@@ -41,8 +41,8 @@ class Evaluator:
         return forward_net
 
     def _load_backward_net(self):
-        """加载后向网络"""
-        backward_net = BackwardNet(BACKWARD_CONFIG).to(self.device)
+        """加载LSTM后向网络"""
+        backward_net = LSTMBackwardNet(BACKWARD_CONFIG).to(self.device)
         checkpoint = torch.load(BACKWARD_MODEL_PATH, map_location=self.device)
         backward_net.load_state_dict(checkpoint['model_state_dict'])
         backward_net.eval()
