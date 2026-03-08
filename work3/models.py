@@ -10,9 +10,13 @@ Mamba 架构参考:
               with Bidirectional State Space Model", 2024
 
 改进要点:
-  1. 并行关联扫描替代顺序 for 循环，大幅提升 GPU 运算效率
-  2. 双向 Mamba Block 替代单向，消除因果性与物理任务的逻辑错位
-  3. 全局平均池化替代取最后时间步，避免信息瓶颈
+  1. 双向 Mamba Block 替代单向，消除因果性与物理任务的逻辑错位
+  2. 全局平均池化替代取最后时间步，避免信息瓶颈
+
+注: 状态递推使用顺序扫描实现。纯 PyTorch 的并行关联扫描虽然减少了
+  串行步数（O(log L) vs O(L)），但每步创建完整 (B,L,D,N) 中间张量，
+  autograd 图的内存开销为 O(L log L)，在 L=500 时会导致显存溢出。
+  真正的并行加速需要自定义 CUDA 算子（如官方 mamba_ssm 包）。
 """
 import math
 import torch
@@ -20,53 +24,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from config import FORWARD_CONFIG, BACKWARD_CONFIG
-
-
-# =============================================================================
-# 并行关联扫描（Parallel Associative Scan）
-# =============================================================================
-
-def parallel_scan(gates, tokens):
-    """
-    并行关联扫描，用于高效计算一阶线性递推:
-        h[t] = gates[t] * h[t-1] + tokens[t],  h[-1] = 0
-
-    使用 Hillis-Steele 风格的递归加倍算法:
-      - 计算复杂度: O(L log L)
-      - 深度（并行步数）: O(log L)
-
-    相比顺序 for 循环（O(L) 串行步），在 GPU 上可获得显著加速，
-    尤其对于后向网络的 500 长序列（9 步 vs 500 步）。
-
-    算法原理:
-      关联操作 (a2, b2) ∘ (a1, b1) = (a2*a1, a2*b1 + b2)
-      通过递归加倍，每步将每个位置的"可见范围"翻倍。
-
-    Args:
-        gates:  (B, L, D, N) - 乘法系数（离散化后的 A_bar）
-        tokens: (B, L, D, N) - 加法项（B_bar * x）
-    Returns:
-        h:      (B, L, D, N) - 扫描结果
-    """
-    T = gates.shape[1]
-    num_steps = int(math.ceil(math.log2(max(T, 2))))
-
-    for i in range(num_steps):
-        stride = 2 ** i
-        if stride >= T:
-            break
-
-        # 构建移位后的版本（对 dim=1 左填充 stride 个 identity 元素）
-        # F.pad 从最后一维向前指定: (N_left, N_right, D_left, D_right, L_left, L_right)
-        padding = [0, 0, 0, 0, stride, 0]
-        shifted_gates = F.pad(gates[:, :-stride], padding, value=1.0)
-        shifted_tokens = F.pad(tokens[:, :-stride], padding, value=0.0)
-
-        # 关联操作: (a2, b2) ∘ (a1, b1) = (a2*a1, a2*b1 + b2)
-        tokens = gates * shifted_tokens + tokens
-        gates = gates * shifted_gates
-
-    return tokens
 
 
 # =============================================================================
@@ -82,7 +39,6 @@ class SelectiveSSM(nn.Module):
         y(t) = C(t) * h(t)
 
     其中 B, C, dt 是输入依赖的（选择性机制），A 是固定参数。
-    使用并行关联扫描替代顺序 for 循环，大幅提升 GPU 运算效率。
     """
     def __init__(self, d_inner, d_state=16, dt_rank=None):
         super().__init__()
@@ -143,16 +99,18 @@ class SelectiveSSM(nn.Module):
         # dt: (B, L, d_inner, 1), B: (B, L, 1, d_state)
         B_bar = dt.unsqueeze(-1) * B.unsqueeze(2)  # (B, L, d_inner, d_state)
 
-        # tokens = B_bar * x（扫描的加法项）
-        # x: (B, L, d_inner) → (B, L, d_inner, 1)
-        scan_tokens = B_bar * x.unsqueeze(-1)  # (B, L, d_inner, d_state)
+        # 顺序扫描（sequential scan）
+        h = torch.zeros(batch, d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        ys = []
 
-        # 并行关联扫描（替代顺序 for 循环）
-        h = parallel_scan(A_bar, scan_tokens)  # (B, L, d_inner, d_state)
+        for t in range(seq_len):
+            # h(t) = A_bar(t) * h(t-1) + B_bar(t) * x(t)
+            h = A_bar[:, t] * h + B_bar[:, t] * x[:, t].unsqueeze(-1)
+            # y(t) = C(t) * h(t)，对 d_state 维求和
+            y_t = torch.sum(h * C[:, t].unsqueeze(1), dim=-1)  # (B, d_inner)
+            ys.append(y_t)
 
-        # 输出: y(t) = C(t) * h(t)，对 d_state 维求和
-        # C: (B, L, d_state) → (B, L, 1, d_state)
-        y = torch.sum(h * C.unsqueeze(2), dim=-1)  # (B, L, d_inner)
+        y = torch.stack(ys, dim=1)  # (B, L, d_inner)
 
         # 残差连接: y = y + D * x
         y = y + self.D.unsqueeze(0).unsqueeze(0) * x
